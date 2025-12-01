@@ -1,0 +1,138 @@
+package app
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"os/exec"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hokupod/fs-tracer/internal/args"
+)
+
+type fakeRunner struct {
+	data string
+}
+
+func (f fakeRunner) Run(pid int, comm string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(f.data)), nil
+}
+
+func noopBuilder(argv []string) (*exec.Cmd, error) {
+	return exec.Command("true"), nil
+}
+
+func baseDate() time.Time {
+	return time.Date(2025, time.November, 29, 0, 0, 0, 0, time.Local)
+}
+
+func commandArgs() []string {
+	return []string{"sh", "-c", "true"}
+}
+
+func TestRunDefaultOutput(t *testing.T) {
+	opts := args.Options{Command: commandArgs()}
+	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n10:00:00.050 write /tmp/out 0.0001 mytool.1\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:          opts,
+		Runner:           fakeRunner{data: log},
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		BaseDate:         baseDate,
+		EnsureSudo:       func(bool) error { return nil },
+		DisablePIDFilter: true,
+		CmdBuilder:       noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	got := out.String()
+	want := "/etc/hosts\n/tmp/out\n"
+	if got != want {
+		t.Fatalf("output mismatch:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRunSplitAccessJSON(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), JSON: true, SplitAccess: true}
+	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n10:00:00.050 write /tmp/out 0.0001 mytool.1\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:          opts,
+		Runner:           fakeRunner{data: log},
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		BaseDate:         baseDate,
+		EnsureSudo:       func(bool) error { return nil },
+		DisablePIDFilter: true,
+		CmdBuilder:       noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	var obj map[string][]string
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &obj); err != nil {
+		t.Fatalf("json parse error: %v", err)
+	}
+	if len(obj["read"]) != 1 || obj["read"][0] != "/etc/hosts" {
+		t.Fatalf("read set mismatch: %v", obj["read"])
+	}
+	if len(obj["write"]) != 1 || obj["write"][0] != "/tmp/out" {
+		t.Fatalf("write set mismatch: %v", obj["write"])
+	}
+}
+
+func TestRunEventsJSON(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), JSON: true, Events: true}
+	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:          opts,
+		Runner:           fakeRunner{data: log},
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		BaseDate:         baseDate,
+		EnsureSudo:       func(bool) error { return nil },
+		DisablePIDFilter: true,
+		CmdBuilder:       noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[0]), &obj); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if obj["path"] != "/etc/hosts" {
+		t.Fatalf("path mismatch: %v", obj["path"])
+	}
+}
+
+func TestRunSandboxSnippet(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), SandboxSnippet: true}
+	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n10:00:00.050 write /tmp/out 0.0001 mytool.1\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:          opts,
+		Runner:           fakeRunner{data: log},
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		BaseDate:         baseDate,
+		EnsureSudo:       func(bool) error { return nil },
+		DisablePIDFilter: true,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	s := out.String()
+	if !strings.Contains(s, "file-read*") || !strings.Contains(s, "file-write*") {
+		t.Fatalf("snippet missing sections: %s", s)
+	}
+}
