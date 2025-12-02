@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hokupod/fs-tracer/internal/args"
+	"github.com/hokupod/fs-tracer/internal/output"
 )
 
 type fakeRunner struct {
@@ -50,7 +51,7 @@ func TestRunDefaultOutput(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	got := out.String()
-	want := "/etc/hosts\n/tmp/out\n"
+	want := output.HeaderLine() + "\n" + "/etc/hosts\n/tmp/out\n"
 	if got != want {
 		t.Fatalf("output mismatch:\n%s\nwant:\n%s", got, want)
 	}
@@ -115,6 +116,35 @@ func TestRunEventsJSON(t *testing.T) {
 	}
 }
 
+func TestRunEventsTextHasHeader(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), Events: true}
+	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:          opts,
+		Runner:           fakeRunner{data: log},
+		Stdout:           &out,
+		Stderr:           &bytes.Buffer{},
+		BaseDate:         baseDate,
+		EnsureSudo:       func(bool) error { return nil },
+		DisablePIDFilter: true,
+		CmdBuilder:       noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected header and at least one event, got %v", lines)
+	}
+	if lines[0] != output.HeaderLine() {
+		t.Fatalf("header mismatch: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "/etc/hosts") {
+		t.Fatalf("event line missing path: %q", lines[1])
+	}
+}
+
 func TestRunSandboxSnippet(t *testing.T) {
 	opts := args.Options{Command: commandArgs(), SandboxSnippet: true}
 	log := "10:00:00.000 open /etc/hosts 0.0001 mytool.1\n10:00:00.050 write /tmp/out 0.0001 mytool.1\n"
@@ -132,6 +162,9 @@ func TestRunSandboxSnippet(t *testing.T) {
 		t.Fatalf("exit code = %d", code)
 	}
 	s := out.String()
+	if !strings.HasPrefix(s, output.HeaderLine()) {
+		t.Fatalf("header missing: %q", s)
+	}
 	if !strings.Contains(s, "file-read*") || !strings.Contains(s, "file-write*") {
 		t.Fatalf("snippet missing sections: %s", s)
 	}

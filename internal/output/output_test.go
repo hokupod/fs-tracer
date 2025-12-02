@@ -27,6 +27,16 @@ func TestEventLine(t *testing.T) {
 	}
 }
 
+func TestHeaderLine(t *testing.T) {
+	got := HeaderLine()
+	if !strings.Contains(got, "fs-tracer") {
+		t.Fatalf("header missing label: %q", got)
+	}
+	if !strings.HasPrefix(got, "=") || !strings.HasSuffix(got, "=") {
+		t.Fatalf("header should be decorated: %q", got)
+	}
+}
+
 func TestEventsJSONLines(t *testing.T) {
 	ev := sampleEvent()
 	lines, err := EventsJSONLines([]fsusage.Event{ev})

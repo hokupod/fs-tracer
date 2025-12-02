@@ -9,6 +9,13 @@ import (
 	"github.com/hokupod/fs-tracer/internal/fsusage"
 )
 
+const headerLine = "========== fs-tracer output =========="
+
+// HeaderLine returns the banner that marks the start of fs-tracer output.
+func HeaderLine() string {
+	return headerLine
+}
+
 // EventLine renders a single event in text mode.
 func EventLine(ev fsusage.Event) string {
 	ts := formatTimestamp(ev)

@@ -192,6 +192,18 @@ func Run(cfg Config) int {
 }
 
 func render(w io.Writer, opts args.Options, events []fsusage.Event) error {
+	headerPrinted := false
+	printHeader := func() {}
+	if !opts.JSON {
+		printHeader = func() {
+			if headerPrinted {
+				return
+			}
+			fmt.Fprintln(w, output.HeaderLine())
+			headerPrinted = true
+		}
+	}
+
 	if opts.Events {
 		if opts.JSON {
 			lines, err := output.EventsJSONLines(events)
@@ -203,6 +215,7 @@ func render(w io.Writer, opts args.Options, events []fsusage.Event) error {
 			}
 			return nil
 		}
+		printHeader()
 		for _, ev := range events {
 			fmt.Fprintln(w, output.EventLine(ev))
 		}
@@ -211,6 +224,7 @@ func render(w io.Writer, opts args.Options, events []fsusage.Event) error {
 
 	// Non-events output
 	if opts.SandboxSnippet {
+		printHeader()
 		read, write := processor.ClassifyPaths(events, opts.DirsOnly)
 		snippet := sandbox.BuildSnippets(read, write)
 		fmt.Fprintln(w, snippet)
@@ -228,6 +242,7 @@ func render(w io.Writer, opts args.Options, events []fsusage.Event) error {
 			fmt.Fprintln(w, string(b))
 			return nil
 		}
+		printHeader()
 		fmt.Fprintln(w, output.SplitAccessText(read, write))
 		return nil
 	}
@@ -241,6 +256,7 @@ func render(w io.Writer, opts args.Options, events []fsusage.Event) error {
 		fmt.Fprintln(w, string(b))
 		return nil
 	}
+	printHeader()
 	fmt.Fprintln(w, output.PathsText(paths))
 	return nil
 }
