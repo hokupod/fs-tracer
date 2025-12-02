@@ -139,10 +139,11 @@ func Run(cfg Config) int {
 				return
 			}
 			mu.Lock()
-			allowed[rootPID] = struct{}{}
+			next := map[int]struct{}{rootPID: {}}
 			for _, c := range children {
-				allowed[c] = struct{}{}
+				next[c] = struct{}{}
 			}
+			allowed = next
 			mu.Unlock()
 		}
 		update()
