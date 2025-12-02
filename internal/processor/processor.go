@@ -30,7 +30,11 @@ func ApplyFilters(events []fsusage.Event, f Filters) []fsusage.Event {
 		if contains(f.IgnoreProcesses, ev.Comm) {
 			continue
 		}
+		if hasPrefix(ev.Path, f.IgnorePrefixes) {
+			continue
+		}
 		path := truncateDepth(ev.Path, f.MaxDepth)
+		// If truncation removed the ignored prefix, still drop the event to honor ignore rules.
 		if hasPrefix(path, f.IgnorePrefixes) {
 			continue
 		}

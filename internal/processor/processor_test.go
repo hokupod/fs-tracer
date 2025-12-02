@@ -60,6 +60,18 @@ func TestApplyFiltersRawSkips(t *testing.T) {
 	}
 }
 
+func TestApplyFiltersIgnoreCWDWithMaxDepth(t *testing.T) {
+	evs := []fsusage.Event{
+		{Path: "/Users/alice/work/proj/app/models/user.rb", Comm: "ruby"},
+		{Path: "/tmp/out", Comm: "ruby"},
+	}
+	filters := Filters{IgnorePrefixes: []string{"/Users/alice/work/proj"}, MaxDepth: 3}
+	filtered := ApplyFilters(evs, filters)
+	if len(filtered) != 1 || filtered[0].Path != "/tmp/out" {
+		t.Fatalf("ignore-cwd with max-depth failed: %+v", filtered)
+	}
+}
+
 func TestUniqueSortedPaths(t *testing.T) {
 	evs := sampleEvents()
 	paths := UniqueSortedPaths(evs, false)
