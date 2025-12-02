@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +40,7 @@ type Config struct {
 	BaseDate         func() time.Time
 	EnsureSudo       func(noSudo bool) error
 	DisablePIDFilter bool
+	ChildFinder      func(rootPID int) ([]int, error)
 }
 
 // Run executes yourcmd, collects fs_usage events, and writes output. It returns
@@ -46,7 +49,6 @@ func Run(cfg Config) int {
 	opts := cfg.Options
 
 	debug := os.Getenv("FS_TRACER_DEBUG") != ""
-	filterPID := !cfg.DisablePIDFilter && !opts.NoPIDFilter
 
 	stdout := cfg.Stdout
 	if stdout == nil {
@@ -58,7 +60,7 @@ func Run(cfg Config) int {
 	}
 	runner := cfg.Runner
 	if runner == nil {
-		runner = fsusage.SudoFsUsageRunner{NoSudo: opts.NoSudo}
+		runner = fsusage.SudoFsUsageRunner{NoSudo: opts.NoSudo, All: opts.FollowChildren}
 	}
 	builder := cfg.CmdBuilder
 	if builder == nil {
@@ -101,11 +103,79 @@ func Run(cfg Config) int {
 		return exitCmdStartErr
 	}
 
+	targetPID := cmd.Process.Pid
+
+	filterPID := !cfg.DisablePIDFilter && !opts.NoPIDFilter
+
+	var (
+		allowPID   func(int) bool
+		stopFollow chan struct{}
+	)
+
+	if !filterPID {
+		allowPID = func(int) bool { return true }
+	} else if opts.FollowChildren {
+		rootPID := targetPID
+		var (
+			mu      sync.RWMutex
+			allowed = map[int]struct{}{rootPID: {}}
+		)
+		allowPID = func(pid int) bool {
+			mu.RLock()
+			defer mu.RUnlock()
+			_, ok := allowed[pid]
+			return ok
+		}
+		finder := cfg.ChildFinder
+		if finder == nil {
+			finder = defaultChildFinder
+		}
+		update := func() {
+			children, err := finder(rootPID)
+			if err != nil {
+				if debug {
+					fmt.Fprintln(stderr, "child finder error:", err)
+				}
+				return
+			}
+			mu.Lock()
+			allowed = map[int]struct{}{rootPID: {}}
+			for _, c := range children {
+				allowed[c] = struct{}{}
+			}
+			mu.Unlock()
+		}
+		update()
+		ticker := time.NewTicker(500 * time.Millisecond)
+		stopFollow = make(chan struct{})
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					update()
+				case <-stopFollow:
+					return
+				}
+			}
+		}()
+	} else {
+		rootPID := targetPID
+		allowPID = func(pid int) bool { return pid == rootPID }
+	}
+
+	defer func() {
+		if stopFollow != nil {
+			close(stopFollow)
+		}
+	}()
+
 	comm := cmd.Path
 	if comm == "" && len(cmd.Args) > 0 {
 		comm = cmd.Args[0]
 	}
-	reader, err := runner.Run(cmd.Process.Pid, filepath.Base(comm))
+	runnerPID := targetPID
+	reader, err := runner.Run(runnerPID, filepath.Base(comm))
 	if err != nil {
 		_ = cmd.Process.Kill()
 		fmt.Fprintln(stderr, "failed to start fs_usage:", err)
@@ -143,7 +213,7 @@ func Run(cfg Config) int {
 				}
 				continue
 			}
-			if filterPID && ev.PID != cmd.Process.Pid {
+			if filterPID && !allowPID(ev.PID) {
 				continue
 			}
 			eventsCh <- ev
@@ -298,6 +368,52 @@ func expandPrefixes(prefixes []string, ignoreCwd bool) []string {
 	}
 	if ignoreCwd && cwd != "" {
 		out = append(out, cwd)
+	}
+	return out
+}
+
+func defaultChildFinder(rootPID int) ([]int, error) {
+	cmd := exec.Command("ps", "-Ao", "pid,ppid")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseDescendants(rootPID, output)
+}
+
+func parseDescendants(rootPID int, psOutput []byte) ([]int, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(psOutput))
+	parents := make(map[int]int)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		parents[pid] = ppid
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return collectDescendants(rootPID, parents), nil
+}
+
+func collectDescendants(rootPID int, parents map[int]int) []int {
+	out := []int{}
+	queue := []int{rootPID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for pid, ppid := range parents {
+			if ppid == current {
+				out = append(out, pid)
+				queue = append(queue, pid)
+			}
+		}
 	}
 	return out
 }

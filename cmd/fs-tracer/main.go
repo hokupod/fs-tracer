@@ -36,6 +36,7 @@ func newRootCmd() *cobra.Command {
 		optNoSudo       bool
 		optRaw          bool
 		optNoPIDFilter  bool
+		optFollowChild  bool
 		optIgnoreCWD    bool
 		optMaxDepth     int
 		optVersion      bool
@@ -73,6 +74,7 @@ func newRootCmd() *cobra.Command {
 				NoSudo:          optNoSudo,
 				Raw:             optRaw,
 				NoPIDFilter:     optNoPIDFilter,
+				FollowChildren:  optFollowChild,
 				IgnoreCWD:       optIgnoreCWD,
 				MaxDepth:        optMaxDepth,
 				Command:         append([]string(nil), positional...),
@@ -97,6 +99,7 @@ func newRootCmd() *cobra.Command {
 	flags.BoolVar(&optNoSudo, "no-sudo", false, "run fs_usage without sudo")
 	flags.BoolVar(&optRaw, "raw", false, "disable ignore filters")
 	flags.BoolVar(&optNoPIDFilter, "no-pid-filter", false, "do not restrict events to target PID")
+	flags.BoolVar(&optFollowChild, "follow-children", false, "include child processes (runs fs_usage without PID filter and filters descendants in-process)")
 	flags.BoolVar(&optIgnoreCWD, "ignore-cwd", false, "ignore events under current working directory")
 	flags.IntVar(&optMaxDepth, "max-depth", 0, "truncate paths to at most N components (0 = unlimited)")
 	flags.BoolVar(&optVersion, "version", false, "print version and exit")

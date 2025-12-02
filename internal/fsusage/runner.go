@@ -17,11 +17,15 @@ type FsUsageRunner interface {
 // SudoFsUsageRunner runs fs_usage via sudo (default) or directly (--no-sudo).
 type SudoFsUsageRunner struct {
 	NoSudo bool
+	All    bool
 }
 
 func (r SudoFsUsageRunner) Run(pid int, comm string) (io.ReadCloser, error) {
 	// Use both filesys and pathname to capture open/stat plus path resolution.
-	cmdArgs := []string{"fs_usage", "-w", "-f", "filesys,pathname", fmt.Sprintf("%d", pid)}
+	cmdArgs := []string{"fs_usage", "-w", "-f", "filesys,pathname"}
+	if !r.All && pid > 0 {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("%d", pid))
+	}
 	if !r.NoSudo {
 		cmdArgs = append([]string{"sudo"}, cmdArgs...)
 	}

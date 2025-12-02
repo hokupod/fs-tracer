@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,15 @@ type fakeRunner struct {
 
 func (f fakeRunner) Run(pid int, comm string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(f.data)), nil
+}
+
+type templRunner struct {
+	template string
+}
+
+func (t templRunner) Run(pid int, comm string) (io.ReadCloser, error) {
+	data := fmt.Sprintf(t.template, pid, pid+1, pid+999)
+	return io.NopCloser(strings.NewReader(data)), nil
 }
 
 func noopBuilder(argv []string) (*exec.Cmd, error) {
@@ -168,4 +179,55 @@ func TestRunSandboxSnippet(t *testing.T) {
 	if !strings.Contains(s, "file-read*") || !strings.Contains(s, "file-write*") {
 		t.Fatalf("snippet missing sections: %s", s)
 	}
+}
+
+func TestRunFollowChildrenFiltersOtherPIDs(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	logTemplate := "10:00:00.000 open /parent/file 0.0001 parent.%d\n" +
+		"10:00:00.010 open /child/file 0.0001 child.%d\n" +
+		"10:00:00.020 open /other/file 0.0001 other.%d\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:    opts,
+		Runner:     templRunner{template: logTemplate},
+		Stdout:     &out,
+		Stderr:     &bytes.Buffer{},
+		BaseDate:   baseDate,
+		EnsureSudo: func(bool) error { return nil },
+		ChildFinder: func(root int) ([]int, error) {
+			return []int{root + 1}, nil
+		},
+		CmdBuilder: noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	expectedBody := "/child/file\n/parent/file\n"
+	expected := output.HeaderLine() + "\n" + expectedBody
+	if out.String() != expected {
+		t.Fatalf("output mismatch:\n%s\nwant:\n%s", out.String(), expected)
+	}
+}
+
+func TestParseDescendants(t *testing.T) {
+	ps := "  PID  PPID\n  10   1\n  11   10\n  12   1\n  13   12\n"
+	desc, err := parseDescendants(1, []byte(ps))
+	if err != nil {
+		t.Fatalf("parseDescendants error: %v", err)
+	}
+	got := strings.Join(toStrings(desc), ",")
+	want := "10,11,12,13"
+	if got != want {
+		t.Fatalf("unexpected descendants: %s", got)
+	}
+}
+
+func toStrings(nums []int) []string {
+	out := make([]string, 0, len(nums))
+	sorted := append([]int(nil), nums...)
+	sort.Ints(sorted)
+	for _, n := range sorted {
+		out = append(out, fmt.Sprintf("%d", n))
+	}
+	return out
 }

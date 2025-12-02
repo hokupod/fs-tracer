@@ -13,6 +13,7 @@ type Options struct {
 	NoSudo          bool
 	Raw             bool
 	NoPIDFilter     bool
+	FollowChildren  bool
 	IgnoreCWD       bool
 	MaxDepth        int
 	Command         []string
