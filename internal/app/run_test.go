@@ -209,6 +209,29 @@ func TestRunFollowChildrenFiltersOtherPIDs(t *testing.T) {
 	}
 }
 
+func TestRunPIDFilterDisabledWhenNotFollowingChildren(t *testing.T) {
+	// fs_usage returns a pid (thread id) different from target; with follow-children OFF
+	// we should still keep events (rely on fs_usage kernel filter).
+	opts := args.Options{Command: commandArgs()}
+	logTemplate := "10:00:00.000 open /tmp/file 0.0001 other.%d\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:    opts,
+		Runner:     templRunner{template: logTemplate},
+		Stdout:     &out,
+		Stderr:     &bytes.Buffer{},
+		BaseDate:   baseDate,
+		EnsureSudo: func(bool) error { return nil },
+		CmdBuilder: noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(out.String(), "/tmp/file") {
+		t.Fatalf("event should pass without follow-children: %q", out.String())
+	}
+}
+
 func TestParseDescendants(t *testing.T) {
 	ps := "  PID  PPID\n  10   1\n  11   10\n  12   1\n  13   12\n"
 	desc, err := parseDescendants(1, []byte(ps))

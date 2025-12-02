@@ -105,7 +105,11 @@ func Run(cfg Config) int {
 
 	targetPID := cmd.Process.Pid
 
-	filterPID := !cfg.DisablePIDFilter && !opts.NoPIDFilter
+	// Apply Go-side PID filtering only when we intentionally broaden fs_usage to all PIDs
+	// (i.e., --follow-children). When fs_usage is already invoked with the target PID,
+	// kernel-side filtering is sufficient and thread-id vs pid formatting differences
+	// in fs_usage output would otherwise drop valid events.
+	filterPID := opts.FollowChildren && !cfg.DisablePIDFilter && !opts.NoPIDFilter
 
 	var (
 		allowPID   func(int) bool
