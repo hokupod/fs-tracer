@@ -3,6 +3,17 @@
 macOS-only file access tracer that runs your command as the original user and parses `fs_usage` output to list touched paths. Designed to gather material for sandbox-exec profiles.
 
 ## Install
+
+### Homebrew (recommended, macOS)
+```sh
+brew install --cask hokupod/tap/fs-tracer
+```
+If macOS Gatekeeper blocks the unsigned binary:
+```sh
+xattr -dr com.apple.quarantine $(brew --prefix)/bin/fs-tracer
+```
+
+### Go install (latest from main)
 ```sh
 go install github.com/hokupod/fs-tracer/cmd/fs-tracer@latest
 ```
@@ -41,7 +52,7 @@ Env for debugging:
 Exit codes: yourcmd’s exit code is propagated; internal errors use 90–99.
 
 ## Shell completion
-Use the built-in cobra completion command:
+Homebrew installs completions automatically. For manual installation (e.g., `go install`):
 ```sh
 fs-tracer completion bash > /etc/bash_completion.d/fs-tracer
 fs-tracer completion zsh  > /usr/local/share/zsh/site-functions/_fs-tracer
