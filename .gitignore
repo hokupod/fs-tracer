@@ -1,0 +1,7 @@
+# Build artifacts
+/fs-tracer
+/dist/
+/completions/
+
+# macOS metadata
+.DS_Store

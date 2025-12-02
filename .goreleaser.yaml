@@ -1,0 +1,86 @@
+version: 2
+
+project_name: fs-tracer
+before:
+  hooks:
+  - go mod tidy
+  - go build -o fs-tracer ./cmd/fs-tracer
+  - mkdir -p completions
+  - ls -la completions/ || echo "completions directory not found"
+  - ./fs-tracer --version
+  - bash -c './fs-tracer completion bash > completions/fs-tracer.bash' || echo "bash completion failed"
+  - bash -c './fs-tracer completion zsh > completions/_fs-tracer' || echo "zsh completion failed"
+  - bash -c './fs-tracer completion fish > completions/fs-tracer.fish' || echo "fish completion failed"
+  - ls -la completions/
+  - find . -name "*.bash" -o -name "*fs-tracer*" | head -10
+
+builds:
+  - id: fs-tracer
+    binary: fs-tracer
+    main: ./cmd/fs-tracer
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+
+archives:
+  - id: fs-tracer
+    ids:
+      - fs-tracer
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - "completions/*"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).
+
+homebrew_casks:
+  - name: fs-tracer
+    ids: [fs-tracer]
+    repository:
+      owner: hokupod
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    url:
+      template: "https://github.com/hokupod/fs-tracer/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+      verified: github.com/hokupod/fs-tracer
+    binaries:
+      - fs-tracer
+    completions:
+      bash: completions/fs-tracer.bash
+      zsh: completions/_fs-tracer
+      fish: completions/fs-tracer.fish
+    caveats: |
+      This CLI is unsigned. If macOS blocks execution, remove the quarantine flag:
+        xattr -dr com.apple.quarantine "$(which fs-tracer)"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/fs-tracer"]
+          end

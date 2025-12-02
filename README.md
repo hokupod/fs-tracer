@@ -32,6 +32,7 @@ fs-tracer --json --split-access -- /usr/bin/curl https://example.com
 - `--no-pid-filter`       : do **not** restrict to yourcmd’s PID (useful for multi-process tools; noise will increase)
 - `--ignore-cwd`          : ignore events under the current working directory (also expands `.` in ignore-prefix to cwd)
 - `--max-depth N`         : truncate paths to at most N components (0 = unlimited, aggregation happens before output/sandbox)
+- `--version`             : print version and exit
 
 Env for debugging:
 - `FS_TRACER_DEBUG=1`     : print raw `fs_usage:` lines and parse errors to stderr
@@ -62,6 +63,9 @@ fs-tracer completion powershell > fs-tracer.ps1  # then import in your profile
 - `--events`: chronological event lines (or JSON lines with `--json`)
 - `--split-access`: read vs write sets (text sections or JSON object)
 - `--sandbox-snippet`: s-expressions for sandbox-exec (read/write separated when `--split-access`)
+
+## License
+MIT License. See `LICENSE` for details.
 
 ## Development
 ```

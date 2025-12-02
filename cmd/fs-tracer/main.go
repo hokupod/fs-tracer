@@ -10,6 +10,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -32,12 +38,16 @@ func newRootCmd() *cobra.Command {
 		optNoPIDFilter  bool
 		optIgnoreCWD    bool
 		optMaxDepth     int
+		optVersion      bool
 	)
 
 	rootCmd := &cobra.Command{
 		Use:   "fs-tracer [OPTIONS] -- yourcmd [ARG ...]",
 		Short: "Trace filesystem accesses of a command via fs_usage",
 		Args: func(cmd *cobra.Command, args []string) error {
+			if optVersion {
+				return nil
+			}
 			if len(args) == 0 {
 				return fmt.Errorf("yourcmd is required after --")
 			}
@@ -47,6 +57,10 @@ func newRootCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, positional []string) error {
+			if optVersion {
+				printVersion(cmd)
+				return nil
+			}
 			opts := args.Options{
 				Events:          optEvents,
 				JSON:            optJSON,
@@ -85,6 +99,7 @@ func newRootCmd() *cobra.Command {
 	flags.BoolVar(&optNoPIDFilter, "no-pid-filter", false, "do not restrict events to target PID")
 	flags.BoolVar(&optIgnoreCWD, "ignore-cwd", false, "ignore events under current working directory")
 	flags.IntVar(&optMaxDepth, "max-depth", 0, "truncate paths to at most N components (0 = unlimited)")
+	flags.BoolVar(&optVersion, "version", false, "print version and exit")
 
 	carapace.Gen(rootCmd).Standalone()
 	carapace.Gen(rootCmd).FlagCompletion(carapace.ActionMap{
@@ -102,6 +117,10 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(newCompletionCmd(rootCmd))
 	return rootCmd
+}
+
+func printVersion(cmd *cobra.Command) {
+	fmt.Fprintf(cmd.OutOrStdout(), "fs-tracer %s (commit %s, built %s)\n", version, commit, date)
 }
 
 func newCompletionCmd(root *cobra.Command) *cobra.Command {
