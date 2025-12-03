@@ -36,18 +36,19 @@ fs-tracer --json --split-access -- /usr/bin/curl https://example.com
 - `--split-access`        : separate read/write sets
 - `--sandbox-snippet`     : emit sandbox-exec s-expressions (mutually exclusive with `--events`)
 - `--dirs`, `--prefix-only`: output parent directories instead of full paths
+- `--allow-process NAME`  : only include events from process name (repeatable)
 - `--ignore-process NAME` : drop events from process name (repeatable)
 - `--ignore-prefix PATH`  : drop events whose path starts with prefix (repeatable)
 - `--no-sudo`             : run `fs_usage` without sudo (fs-tracer must then be root, yourcmd still runs as original UID/GID)
 - `--raw`                 : disable ignore-process/prefix filters
-- `--no-pid-filter`       : do **not** restrict to yourcmd’s PID (useful for multi-process tools; noise will increase)
+- `--follow-children`     : start fs_usage without PID and filter descendants in-process (comm/PID-based)
+- `--no-pid-filter`       : disable Go-side PID/comm filtering (fs_usage scope depends on `--follow-children`)
 - `--ignore-cwd`          : ignore events under the current working directory (also expands `.` in ignore-prefix to cwd)
 - `--max-depth N`         : truncate paths to at most N components (0 = unlimited, aggregation happens before output/sandbox)
 - `--version`             : print version and exit
 
 Env for debugging:
 - `FS_TRACER_DEBUG=1`     : print raw `fs_usage:` lines and parse errors to stderr
-- `FS_TRACER_DEBUG_ALL=1` : disable PID filter (same effect as `--no-pid-filter`) in debug runs
 
 Exit codes: yourcmd’s exit code is propagated; internal errors use 90–99.
 
@@ -61,12 +62,14 @@ fs-tracer completion powershell > fs-tracer.ps1  # then import in your profile
 ```
 
 ## How it works (and why PID filter exists)
-`fs_usage` is started **with** the target PID (`fs_usage -w -f filesys,pathname <pid>`), so kernel-side tracing is already narrowed to your command. fs-tracer then applies an in-process PID filter (default ON) and the other filters (allow/ignore/process/prefix, max-depth). `--no-pid-filter` only disables the Go-side PID check; it does **not** widen fs_usage’s kernel tracing to other PIDs. Use `--allow-process`/`--ignore-*`/`--max-depth` to further shape what gets emitted.
+**Without `--follow-children`**: `fs_usage` is started with the target PID (`fs_usage -w -f filesys,pathname <pid>`), so kernel-side tracing is already narrowed to your command. fs-tracer then applies an in-process PID filter (default ON) plus allow/ignore/max-depth. `--no-pid-filter` only removes the Go-side check; it does **not** widen fs_usage’s kernel scope.
+
+**With `--follow-children`**: `fs_usage` is started without a PID (captures all), and fs-tracer filters events by descendant PIDs and comm names. On SIP/macOS 15+ the tool cannot rely on thread IDs, so comm-based filtering is important. If many processes share the same comm, use `--allow-process` to tighten the set.
 
 ## Known limitations (fs_usage / macOS)
 - **SIP-protected platform binaries** (Apple-provided commands) sometimes emit no events to dtrace/fs_usage even as root. If fs_usage itself prints nothing, fs-tracer cannot help. Use a non-platform build or consider EndpointSecurity if you need full coverage.
 - **Very short-lived commands** may finish before fs_usage attaches. Workaround: wrap with `sh -c 'yourcmd; sleep 1'` to keep the PID alive briefly.
-- **PID filter trade-off**: `--no-pid-filter` only disables Go-side filtering; fs_usage is still started with the target PID, so kernel tracing stays narrow. Use `--allow-process`/`--ignore-*` to shape events if you need child processes.
+- **PID filter trade-off**: With `--follow-children`, filtering is by descendant PIDs and comm names (thread IDs are often unavailable due to SIP). If many processes share the same comm, use `--allow-process` to reduce noise.
 - **Full Disk Access**: granting FDA to Terminal/sudo generally does not affect fs_usage output; missing events are usually due to SIP or sampling, not TCC.
 
 ## Output modes

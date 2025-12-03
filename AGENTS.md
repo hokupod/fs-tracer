@@ -28,3 +28,4 @@
 - Error codes: propagate yourcmd exit code; internal errors 90–99.
 - fs_usage invocation: `sudo fs_usage -w -f filesys,pathname <pid>` (or without sudo when `--no-sudo`).
 - Keep options centralized in cobra; avoid duplicate flag definitions elsewhere.
+- Thread IDs via Mach are not available in SIP/macOS 15+ environments; follow-children filtering should rely on descendant PIDs and comm names. When thread IDs are unavailable, encourage `--allow-process` to reduce noise.

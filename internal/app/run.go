@@ -20,6 +20,7 @@ import (
 	"github.com/hokupod/fs-tracer/internal/fsusage"
 	"github.com/hokupod/fs-tracer/internal/output"
 	"github.com/hokupod/fs-tracer/internal/processor"
+	"github.com/hokupod/fs-tracer/internal/procinfo"
 	"github.com/hokupod/fs-tracer/internal/sandbox"
 )
 
@@ -29,6 +30,59 @@ const (
 	exitFsUsageErr  = 92
 	exitScanErr     = 93
 )
+
+type pidTracker struct {
+	mu     sync.RWMutex
+	allow  map[uint64]struct{}
+	bypass bool
+}
+
+const zeroMatchBypassThreshold = 50
+
+func newPIDTracker(rootPID int) *pidTracker {
+	return &pidTracker{allow: map[uint64]struct{}{uint64(rootPID): {}}}
+}
+
+func (t *pidTracker) allowID(id int) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.bypass {
+		return true
+	}
+	_, ok := t.allow[uint64(id)]
+	return ok
+}
+
+func (t *pidTracker) addPID(pid int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.allow[uint64(pid)] = struct{}{}
+}
+
+func (t *pidTracker) addThreads(tids []uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, tid := range tids {
+		t.allow[tid] = struct{}{}
+	}
+}
+
+// setBypass enables allow-all mode; returns true when state changed.
+func (t *pidTracker) setBypass() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.bypass {
+		return false
+	}
+	t.bypass = true
+	return true
+}
+
+func (t *pidTracker) isBypass() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.bypass
+}
 
 // Config controls Run behavior; zero values pick sensible defaults.
 type Config struct {
@@ -41,6 +95,8 @@ type Config struct {
 	EnsureSudo       func(noSudo bool) error
 	DisablePIDFilter bool
 	ChildFinder      func(rootPID int) ([]int, error)
+	ThreadLister     func(pid int) ([]uint64, error)
+	CommFinder       func(pid int) (string, error)
 }
 
 // Run executes yourcmd, collects fs_usage events, and writes output. It returns
@@ -114,27 +170,74 @@ func Run(cfg Config) int {
 	var (
 		allowPID   func(int) bool
 		stopFollow chan struct{}
+		tracker    *pidTracker
+		allowedComm map[string]struct{}
 	)
+
+	addComm := func(c string) {
+		if c == "" {
+			return
+		}
+		if allowedComm == nil {
+			allowedComm = make(map[string]struct{})
+		}
+		allowedComm[c] = struct{}{}
+	}
 
 	if !filterPID {
 		allowPID = func(int) bool { return true }
 	} else if opts.FollowChildren {
 		rootPID := targetPID
-		var (
-			mu      sync.RWMutex
-			allowed = map[int]struct{}{rootPID: {}}
-		)
-		allowPID = func(pid int) bool {
-			mu.RLock()
-			defer mu.RUnlock()
-			_, ok := allowed[pid]
-			return ok
+		tracker = newPIDTracker(rootPID)
+		threadLister := cfg.ThreadLister
+		if threadLister == nil {
+			threadLister = procinfo.ListThreads
 		}
+		commFinder := cfg.CommFinder
+		if commFinder == nil {
+			commFinder = defaultCommFinder
+		}
+
+		knownPIDs := map[int]struct{}{rootPID: {}}
+
+		addPIDWithThreads := func(pid int) {
+			tracker.addPID(pid)
+			tids, err := threadLister(pid)
+				if err != nil {
+					if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "protection") {
+						// Mach protection failure etc. → すぐに comm-only に寄せる
+						if tracker.setBypass() {
+							fmt.Fprintln(stderr, "pid filter switched to comm-only: thread lookup blocked (permission/protection)")
+						}
+						return
+					}
+					if !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EINVAL) {
+						if tracker.setBypass() {
+							fmt.Fprintln(stderr, "pid filter disabled after thread lookup failure:", err)
+						}
+					}
+					return
+				}
+			if c, err := commFinder(pid); err == nil {
+				cBase := filepath.Base(c)
+				addComm(cBase)
+				// thread handles are only trusted when their comm is known/allowed to reduce accidental PID collisions.
+				if len(tids) > 0 {
+					if _, ok := allowedComm[cBase]; ok {
+						tracker.addThreads(tids)
+					}
+				}
+			}
+		}
+
+		addPIDWithThreads(rootPID)
+
 		finder := cfg.ChildFinder
 		if finder == nil {
 			finder = defaultChildFinder
 		}
-		update := func() {
+
+		updateChildren := func() {
 			children, err := finder(rootPID)
 			if err != nil {
 				if debug {
@@ -142,27 +245,42 @@ func Run(cfg Config) int {
 				}
 				return
 			}
-			mu.Lock()
-			allowed = map[int]struct{}{rootPID: {}}
 			for _, c := range children {
-				allowed[c] = struct{}{}
+				if _, ok := knownPIDs[c]; ok {
+					continue
+				}
+				knownPIDs[c] = struct{}{}
+				addPIDWithThreads(c)
 			}
-			mu.Unlock()
 		}
-		update()
-		ticker := time.NewTicker(500 * time.Millisecond)
+
+		refreshThreads := func() {
+			for pid := range knownPIDs {
+				addPIDWithThreads(pid)
+			}
+		}
+
+		updateChildren()
+
+		childTicker := time.NewTicker(500 * time.Millisecond)
+		tidTicker := time.NewTicker(2 * time.Second)
 		stopFollow = make(chan struct{})
 		go func() {
-			defer ticker.Stop()
+			defer childTicker.Stop()
+			defer tidTicker.Stop()
 			for {
 				select {
-				case <-ticker.C:
-					update()
+				case <-childTicker.C:
+					updateChildren()
+				case <-tidTicker.C:
+					refreshThreads()
 				case <-stopFollow:
 					return
 				}
 			}
 		}()
+
+		allowPID = tracker.allowID
 	} else {
 		rootPID := targetPID
 		allowPID = func(pid int) bool { return pid == rootPID }
@@ -177,6 +295,9 @@ func Run(cfg Config) int {
 	comm := cmd.Path
 	if comm == "" && len(cmd.Args) > 0 {
 		comm = cmd.Args[0]
+	}
+	if filterPID && opts.FollowChildren {
+		addComm(filepath.Base(comm))
 	}
 	runnerPID := targetPID
 	reader, err := runner.Run(runnerPID, filepath.Base(comm))
@@ -205,20 +326,39 @@ func Run(cfg Config) int {
 		defer close(eventsCh)
 		scanner := bufio.NewScanner(r)
 		scanner.Buffer(make([]byte, 0, 128*1024), 512*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if debug {
-				fmt.Fprintln(stderr, "fs_usage:", line)
-			}
-			ev, err := fsusage.ParseLine(line, baseDateValue)
-			if err != nil {
+		parsedCount := 0
+		passedCount := 0
+			for scanner.Scan() {
+				line := scanner.Text()
 				if debug {
-					fmt.Fprintln(stderr, "parse error:", err, "line:", line)
+					fmt.Fprintln(stderr, "fs_usage:", line)
 				}
-				continue
-			}
-			if filterPID && !allowPID(ev.PID) {
-				continue
+				ev, err := fsusage.ParseLine(line, baseDateValue)
+				if err != nil {
+					if debug {
+						fmt.Fprintln(stderr, "parse error:", err, "line:", line)
+					}
+					continue
+				}
+				if filterPID {
+					parsedCount++
+					allowed := allowPID(ev.PID)
+					// Always permit events whose comm is already known, to reduce reliance on TID/PID formatting.
+					if !allowed {
+						if _, ok := allowedComm[ev.Comm]; ok {
+							allowed = true
+						}
+					}
+				if !allowed && passedCount == 0 && parsedCount >= zeroMatchBypassThreshold && tracker != nil && !tracker.isBypass() {
+					fmt.Fprintln(stderr, "pid filter switched to comm-only after zero-match streak")
+					if _, ok := allowedComm[ev.Comm]; ok {
+						allowed = true
+					}
+				}
+				if !allowed {
+					continue
+				}
+				passedCount++
 			}
 			eventsCh <- ev
 		}
@@ -383,6 +523,15 @@ func defaultChildFinder(rootPID int) ([]int, error) {
 		return nil, err
 	}
 	return parseDescendants(rootPID, output)
+}
+
+func defaultCommFinder(pid int) (string, error) {
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func parseDescendants(rootPID int, psOutput []byte) ([]int, error) {

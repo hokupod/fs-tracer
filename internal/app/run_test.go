@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -197,6 +198,9 @@ func TestRunFollowChildrenFiltersOtherPIDs(t *testing.T) {
 		ChildFinder: func(root int) ([]int, error) {
 			return []int{root + 1}, nil
 		},
+		ThreadLister: func(pid int) ([]uint64, error) {
+			return []uint64{uint64(pid)}, nil
+		},
 		CmdBuilder: noopBuilder,
 	})
 	if code != 0 {
@@ -206,6 +210,105 @@ func TestRunFollowChildrenFiltersOtherPIDs(t *testing.T) {
 	expected := output.HeaderLine() + "\n" + expectedBody
 	if out.String() != expected {
 		t.Fatalf("output mismatch:\n%s\nwant:\n%s", out.String(), expected)
+	}
+}
+
+func TestRunFollowChildrenAllowsThreadIDs(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	logTemplate := "10:00:00.000 open /tmp/root 0.0001 root.%d\n" +
+		"10:00:00.010 open /tmp/child 0.0001 child.%d\n" +
+		"10:00:00.020 open /tmp/thread 0.0001 root.%d\n"
+	var out bytes.Buffer
+	threadLister := func(pid int) ([]uint64, error) {
+		// Allow pid itself and a synthetic thread id pid+999 to simulate fs_usage TID。
+		return []uint64{uint64(pid), uint64(pid + 999)}, nil
+	}
+	code := Run(Config{
+		Options:      opts,
+		Runner:       templRunner{template: logTemplate},
+		Stdout:       &out,
+		Stderr:       &bytes.Buffer{},
+		BaseDate:     baseDate,
+		EnsureSudo:   func(bool) error { return nil },
+		ChildFinder:  func(int) ([]int, error) { return nil, nil },
+		ThreadLister: threadLister,
+		CommFinder:   func(int) (string, error) { return "root", nil },
+		CmdBuilder:   noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected header plus paths, got: %v", lines)
+	}
+	paths := lines[1:]
+	if !contains(paths, "/tmp/thread") {
+		t.Fatalf("thread-id path missing: %v", paths)
+	}
+}
+
+func TestRunFollowChildrenThreadLookupFailureDisablesFilter(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	logTemplate := "10:00:00.000 open /tmp/thread 0.0001 root.%d\n" +
+		"10:00:00.010 open /tmp/tid 0.0001 root.%d\n"
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:    opts,
+		Runner:     templRunner{template: logTemplate},
+		Stdout:     &out,
+		Stderr:     &bytes.Buffer{},
+		BaseDate:   baseDate,
+		EnsureSudo: func(bool) error { return nil },
+		ChildFinder: func(int) ([]int, error) {
+			return nil, nil
+		},
+		ThreadLister: func(int) ([]uint64, error) {
+			return nil, syscall.EPERM
+		},
+		CommFinder: func(pid int) (string, error) {
+			return "root", nil
+		},
+		CmdBuilder: noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(out.String(), "/tmp/tid") {
+		t.Fatalf("expected output despite thread lookup failure, got: %q", out.String())
+	}
+}
+
+func TestRunFollowChildrenZeroMatchBypass(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	var b strings.Builder
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&b, "10:00:00.%03d open /tmp/file%02d 0.0001 root.%d\n", i, i%5, i+100)
+	}
+	log := b.String()
+	var out bytes.Buffer
+	code := Run(Config{
+		Options:    opts,
+		Runner:     fakeRunner{data: log},
+		Stdout:     &out,
+		Stderr:     &bytes.Buffer{},
+		BaseDate:   baseDate,
+		EnsureSudo: func(bool) error { return nil },
+		ChildFinder: func(int) ([]int, error) {
+			return nil, nil
+		},
+		ThreadLister: func(int) ([]uint64, error) {
+			// Return IDs that never match the log, forcing zero-match bypass.
+			return []uint64{999999}, nil
+		},
+		CommFinder: func(int) (string, error) { return "root", nil },
+		CmdBuilder: noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if !strings.Contains(out.String(), "/tmp/file") {
+		t.Fatalf("expected output after bypass, got: %q", out.String())
 	}
 }
 
@@ -253,4 +356,13 @@ func toStrings(nums []int) []string {
 		out = append(out, fmt.Sprintf("%d", n))
 	}
 	return out
+}
+
+func contains(list []string, target string) bool {
+	for _, s := range list {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
