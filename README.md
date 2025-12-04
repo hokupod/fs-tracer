@@ -78,6 +78,48 @@ fs-tracer completion powershell > fs-tracer.ps1  # then import in your profile
 - `--split-access`: read vs write sets (text sections or JSON object)
 - `--sandbox-snippet`: s-expressions for sandbox-exec (read/write separated when `--split-access`)
 
+<details>
+<summary>Sequence (option effects: <code>--follow-children</code>, <code>--no-pid-filter</code>, filtering & outputs)</summary>
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FT as fs-tracer
+    participant FS as fs_usage
+    participant Filt as Filters
+    participant Out as Output
+
+    User->>FT: fs-tracer [options] -- yourcmd
+    FT->>yourcmd: start yourcmd (drops to original UID/GID if sudo)
+    alt --follow-children ON
+        FT->>FS: start fs_usage -w -f filesys,pathname (no PID)
+    else --follow-children OFF
+        FT->>FS: start fs_usage -w -f filesys,pathname <target PID>
+    end
+
+    FS-->>FT: stream fs_usage lines (PID/TID-ish numeric suffix)
+    FT->>Filt: parse lines -> events
+
+    note over Filt: Build allow-set<br/>- target PID<br/>- descendant PIDs (if follow-children)<br/>- comm allowlist: parent + children comms, plus --allow-process<br/>- thread handles only when comm is known<br/>--no-pid-filter: skip allow-set check<br/>--raw: skip ignore-process/prefix filters
+
+    alt --no-pid-filter
+        Filt->>Out: pass all parsed events (only parseable lines)
+    else
+        Filt->>Out: events with PID/comm in allow-set
+    end
+
+    note over Out: Ignore filters: --ignore-process, --ignore-prefix, --ignore-cwd<br/>Path shaping: --dirs, --max-depth<br/>Modes: --events / --split-access / --sandbox-snippet / default paths<br/>Formats: text or --json
+
+    Out-->>User: header + body (text) or JSON
+```
+
+Option interactions (quick map):
+- Scope: `--follow-children` widens fs_usage capture; `--no-pid-filter` removes Go-side PID/comm gating.
+- Noise control: `--allow-process`, `--ignore-process`, `--ignore-prefix`, `--ignore-cwd`, `--raw` (disables ignore filters).
+- Path shaping: `--dirs`, `--max-depth`.
+- Presentation: `--events`, `--split-access`, `--sandbox-snippet`, `--json`.
+</details>
+
 ## License
 MIT License. See `LICENSE` for details.
 
