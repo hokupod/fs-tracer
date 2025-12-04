@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -31,6 +33,28 @@ type templRunner struct {
 func (t templRunner) Run(pid int, comm string) (io.ReadCloser, error) {
 	data := fmt.Sprintf(t.template, pid, pid+1, pid+999)
 	return io.NopCloser(strings.NewReader(data)), nil
+}
+
+type zeroMatchRunner struct {
+	lines  int
+	offset int
+	comm   string
+	calls  *int
+}
+
+func (z zeroMatchRunner) Run(pid int, comm string) (io.ReadCloser, error) {
+	if z.calls != nil {
+		*z.calls++
+	}
+	var b strings.Builder
+	for i := 0; i < z.lines; i++ {
+		c := z.comm
+		if c == "" {
+			c = "other"
+		}
+		fmt.Fprintf(&b, "10:00:00.%03d open /tmp/file%03d 0.0001 %s.%d\n", i%1000, i, c, pid+z.offset+i)
+	}
+	return io.NopCloser(strings.NewReader(b.String())), nil
 }
 
 func noopBuilder(argv []string) (*exec.Cmd, error) {
@@ -309,6 +333,84 @@ func TestRunFollowChildrenZeroMatchBypass(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "/tmp/file") {
 		t.Fatalf("expected output after bypass, got: %q", out.String())
+	}
+}
+
+func TestRunFollowChildrenZeroMatchBypassLogsOnce(t *testing.T) {
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	runnerCalls := 0
+	threadCalls := 0
+	childCalls := 0
+	code := Run(Config{
+		Options:    opts,
+		Runner:     zeroMatchRunner{lines: 120, offset: 10000, comm: "other", calls: &runnerCalls},
+		Stdout:     &out,
+		Stderr:     io.MultiWriter(&errBuf, io.Discard),
+		BaseDate:   baseDate,
+		EnsureSudo: func(bool) error { return nil },
+		ChildFinder: func(int) ([]int, error) {
+			childCalls++
+			return nil, nil
+		},
+		ThreadLister: func(int) ([]uint64, error) {
+			threadCalls++
+			// Return a TID that never appears in logs to trigger the zero-match path.
+			return []uint64{999999}, nil
+		},
+		CommFinder: func(int) (string, error) { return "root", nil },
+		CmdBuilder: noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	msg := "pid filter switched to comm-only after zero-match streak"
+	if c := strings.Count(errBuf.String(), msg); c != 1 {
+		t.Fatalf("expected single zero-match notice, got %d: %q (runner=%d threads=%d children=%d)", c, errBuf.String(), runnerCalls, threadCalls, childCalls)
+	}
+	if !strings.Contains(out.String(), "/tmp/file") {
+		t.Fatalf("expected output after zero-match bypass, got: %q", out.String())
+	}
+}
+
+func TestRunFollowChildrenSkipsSelfProcess(t *testing.T) {
+	selfComm := filepath.Base(os.Args[0])
+	opts := args.Options{Command: commandArgs(), FollowChildren: true}
+	var b strings.Builder
+	// First 55 lines: unknown comm to trigger zero-match fallback; then lines from our own comm.
+	for i := 0; i < 55; i++ {
+		fmt.Fprintf(&b, "10:00:00.%03d open /tmp/other%02d 0.0001 other.%d\n", i%1000, i, 2000+i)
+	}
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&b, "10:00:01.%03d open /tmp/self%02d 0.0001 %s.%d\n", i%1000, i, selfComm, 4000+i)
+	}
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	code := Run(Config{
+		Options:      opts,
+		Runner:       fakeRunner{data: b.String()},
+		Stdout:       &out,
+		Stderr:       &errBuf,
+		BaseDate:     baseDate,
+		EnsureSudo:   func(bool) error { return nil },
+		ChildFinder:  func(int) ([]int, error) { return nil, nil },
+		ThreadLister: func(int) ([]uint64, error) { return []uint64{999999}, nil },
+		CommFinder:   func(int) (string, error) { return "root", nil },
+		CmdBuilder:   noopBuilder,
+	})
+	if code != 0 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if strings.Contains(out.String(), "/tmp/self") {
+		t.Fatalf("self process paths should be filtered out, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "/tmp/other") {
+		t.Fatalf("expected other process paths to remain, got: %q", out.String())
+	}
+	msg := "pid filter switched to comm-only after zero-match streak"
+	if c := strings.Count(errBuf.String(), msg); c > 1 {
+		t.Fatalf("expected zero or one notice, got %d: %q", c, errBuf.String())
 	}
 }
 

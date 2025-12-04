@@ -168,9 +168,9 @@ func Run(cfg Config) int {
 	filterPID := opts.FollowChildren && !cfg.DisablePIDFilter && !opts.NoPIDFilter
 
 	var (
-		allowPID   func(int) bool
-		stopFollow chan struct{}
-		tracker    *pidTracker
+		allowPID    func(int) bool
+		stopFollow  chan struct{}
+		tracker     *pidTracker
 		allowedComm map[string]struct{}
 	)
 
@@ -203,21 +203,21 @@ func Run(cfg Config) int {
 		addPIDWithThreads := func(pid int) {
 			tracker.addPID(pid)
 			tids, err := threadLister(pid)
-				if err != nil {
-					if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "protection") {
-						// Mach protection failure etc. → すぐに comm-only に寄せる
-						if tracker.setBypass() {
-							fmt.Fprintln(stderr, "pid filter switched to comm-only: thread lookup blocked (permission/protection)")
-						}
-						return
-					}
-					if !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EINVAL) {
-						if tracker.setBypass() {
-							fmt.Fprintln(stderr, "pid filter disabled after thread lookup failure:", err)
-						}
+			if err != nil {
+				if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "protection") {
+					// Mach protection failure etc. → すぐに comm-only に寄せる
+					if tracker.setBypass() {
+						fmt.Fprintln(stderr, "pid filter switched to comm-only: thread lookup blocked (permission/protection)")
 					}
 					return
 				}
+				if !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EINVAL) {
+					if tracker.setBypass() {
+						fmt.Fprintln(stderr, "pid filter disabled after thread lookup failure:", err)
+					}
+				}
+				return
+			}
 			if c, err := commFinder(pid); err == nil {
 				cBase := filepath.Base(c)
 				addComm(cBase)
@@ -328,29 +328,39 @@ func Run(cfg Config) int {
 		scanner.Buffer(make([]byte, 0, 128*1024), 512*1024)
 		parsedCount := 0
 		passedCount := 0
-			for scanner.Scan() {
-				line := scanner.Text()
+		zeroMatchNotified := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if debug {
+				fmt.Fprintln(stderr, "fs_usage:", line)
+			}
+			ev, err := fsusage.ParseLine(line, baseDateValue)
+			if err != nil {
 				if debug {
-					fmt.Fprintln(stderr, "fs_usage:", line)
+					fmt.Fprintln(stderr, "parse error:", err, "line:", line)
 				}
-				ev, err := fsusage.ParseLine(line, baseDateValue)
-				if err != nil {
-					if debug {
-						fmt.Fprintln(stderr, "parse error:", err, "line:", line)
+				continue
+			}
+			// Always skip fs-tracer itself to avoid self-noise even in bypass/fallback paths.
+			if ev.PID == os.Getpid() || ev.Comm == filepath.Base(os.Args[0]) {
+				continue
+			}
+			if filterPID {
+				parsedCount++
+				allowed := allowPID(ev.PID)
+				// Always permit events whose comm is already known, to reduce reliance on TID/PID formatting.
+				if !allowed {
+					if _, ok := allowedComm[ev.Comm]; ok {
+						allowed = true
 					}
-					continue
 				}
-				if filterPID {
-					parsedCount++
-					allowed := allowPID(ev.PID)
-					// Always permit events whose comm is already known, to reduce reliance on TID/PID formatting.
-					if !allowed {
-						if _, ok := allowedComm[ev.Comm]; ok {
-							allowed = true
-						}
-					}
 				if !allowed && passedCount == 0 && parsedCount >= zeroMatchBypassThreshold && tracker != nil && !tracker.isBypass() {
-					fmt.Fprintln(stderr, "pid filter switched to comm-only after zero-match streak")
+					if !zeroMatchNotified {
+						fmt.Fprintln(stderr, "pid filter switched to comm-only after zero-match streak")
+						zeroMatchNotified = true
+					}
+					// Fall back to comm-based allowlist for the current and future events of this comm.
+					addComm(ev.Comm)
 					if _, ok := allowedComm[ev.Comm]; ok {
 						allowed = true
 					}
